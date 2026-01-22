@@ -1,14 +1,12 @@
 /*
  * nanovisor - A Minimal Type 2 Hypervisor
- *
  * Copyright (c) 2026 Mohammad Shehar Yaar Tausif <sheharyaar48@gmail.com>
- *
- * This file is licensed under the MIT License.
  */
-
-#include "log.h"
-#include <stdbool.h>
-#include <stdint.h>
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/init.h>
+#include <linux/types.h>
+#include <linux/printk.h>
 
 #define FEAT_IDENT_CPUID 0x80000001
 #define FEAT_SVM_FEAT_CPUID 0x8000000A
@@ -25,7 +23,7 @@
 
 #define TEST_SVM_FEAT(val, feat) ((val >> feat) & 0b01)
 
-struct __attribute__((packed)) svm_features {
+struct svm_features {
 	uint32_t nasid;
 	uint32_t feat_mask;
 	bool x2avic_ext;
@@ -33,17 +31,16 @@ struct __attribute__((packed)) svm_features {
 
 static void print_svm_feat(struct svm_features *feat) {
 	pr_debug("mask=%x", feat->feat_mask);
-	pr_info_raw("No. of available address space identifiers (NASID) = %d\n",
-		    feat->nasid);
-	pr_info_raw("x2AVIC_EXT support: %s\n",
+	pr_info("Address Space Identifiers (NASID): %d\n", feat->nasid);
+	pr_info("x2AVIC_EXT support: %s\n",
 		    feat->x2avic_ext ? "yes" : "no");
 	uint32_t val = feat->feat_mask;
 
 #define TEST_PRINT_FEAT(val, feat, str)                                        \
 	if (TEST_SVM_FEAT(val, FEAT_##feat))                                   \
-		pr_info_raw(str ": yes\n");                                    \
+		pr_info(str ": yes\n");                                    \
 	else                                                                   \
-		pr_info_raw(str ": no\n");
+		pr_info(str ": no\n");
 
 	TEST_PRINT_FEAT(val, NP, "Nested Paging");
 	TEST_PRINT_FEAT(val, SVML, "SVM Lock");
@@ -57,7 +54,7 @@ static void print_svm_feat(struct svm_features *feat) {
 }
 
 static bool svm_enabled(void) {
-	unsigned int status = 0;
+	uint32_t status = 0;
 	__asm__("mov $0x80000001, %%eax\n"
 		"cpuid\n"
 		: "=c"(status)::"eax", "ebx", "edx");
@@ -68,9 +65,10 @@ static bool svm_enabled(void) {
 		return false;
 }
 
-int main() {
-	bool svm = svm_enabled();
-	if (!svm) {
+static int __init nano_init(void)
+{
+	pr_info("Nanovisor Loaded\n");
+	if (!svm_enabled()) {
 		pr_err("SVM support not enabled");
 		return 0;
 	}
@@ -86,5 +84,19 @@ int main() {
 	svm_feat.x2avic_ext = (feat_x2avic >> FEAT_X2AVIC_EXT_OFF) & 0b01;
 
 	print_svm_feat(&svm_feat);
+
 	return 0;
 }
+
+static void __exit nano_exit(void)
+{
+	pr_info("Nanovisor Unloaded\n");
+}
+
+module_init(nano_init);
+module_exit(nano_exit);
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Mohammad Shehar Yaar Tausif <sheharyaar48@gmail.com>");
+MODULE_DESCRIPTION("Minimal Hypervisor");
+

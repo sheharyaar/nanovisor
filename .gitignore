@@ -1,1 +1,9 @@
-build/
+*.o
+*.ko
+*.mod*
+*.cmd
+*.symvers
+*.order
+compile_commands.json
+.cache/
+

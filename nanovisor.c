@@ -4,6 +4,7 @@
  */
 #include "nanovisor.h"
 #include <asm/cpufeature.h>
+#include <asm/io.h>
 #include <asm/msr.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -12,6 +13,19 @@
 
 static u64 svm_cpu_support_mask = 0;
 static u64 svm_cpu_enabled_mask = 0;
+struct svm_vmcb *svm_vmcb_ptr = NULL;
+
+static int svm_run_prep(void) {
+	svm_vmcb_ptr = (struct svm_vmcb *)get_zeroed_page(GFP_KERNEL);
+	if (!svm_vmcb_ptr)
+		return -ENOMEM;
+
+	pr_debug("page allocation successful: %px!\n", (void *)svm_vmcb_ptr);
+
+	pr_debug("page allocated for vmcb: KVA(%px), PA(%px)\n",
+		 (void *)svm_vmcb_ptr, (void *)virt_to_phys(svm_vmcb_ptr));
+	return 0;
+}
 
 static void svm_features_print(void) {
 #define TEST_PRINT_FEAT(feat, str)                                             \
@@ -33,8 +47,9 @@ static void svm_features_print(void) {
 
 static bool svm_switch(int cpu, bool enable) {
 	// check EFER.SVME if already enabled
-	u64 efer_eax = 0;
-	rdmsrq_on_cpu(cpu, MSR_EFER, &efer_eax);
+	u32 efer_eax = 0;
+	u32 efer_eax_h = 0;
+	rdmsr_on_cpu(cpu, MSR_EFER, &efer_eax, &efer_eax_h);
 
 	// TODO: test this check for already enabled, why does VirutalBox say
 	// already in use when this is loaded in host.
@@ -52,9 +67,9 @@ static bool svm_switch(int cpu, bool enable) {
 		efer_eax &= ~(1 << 12);
 	}
 
-	wrmsrq_on_cpu(cpu, MSR_EFER, efer_eax);
+	wrmsr_on_cpu(cpu, MSR_EFER, efer_eax, 0);
 
-	rdmsrq_on_cpu(cpu, MSR_EFER, &efer_eax);
+	rdmsr_on_cpu(cpu, MSR_EFER, &efer_eax, &efer_eax_h);
 	if (enable) {
 		if ((efer_eax >> 12) & 0b01) {
 			pr_info("[CPU %d] SVM enabled successfully\n", cpu);
@@ -90,8 +105,9 @@ static bool svm_support_avail(int cpu) {
 	}
 
 	// check if SVM is dsiabled on firmware level
-	u64 vm_cr = 0;
-	rdmsrq_on_cpu(cpu, MSR_VM_CR, &vm_cr);
+	u32 vm_cr = 0;
+	u32 vm_cr_h = 0;
+	rdmsr_on_cpu(cpu, MSR_VM_CR, &vm_cr, &vm_cr_h);
 	if (!((vm_cr >> 4) & 0b01)) {
 		return true; // it's not disabled (+ its supported by CPU)
 	}
@@ -112,6 +128,7 @@ static int __init nano_init(void) {
 	pr_info("Nanovisor Loaded\n");
 	int cpu;
 
+	// enable SVME on each CPU
 	for_each_online_cpu(cpu) {
 		if (svm_support_avail(cpu)) {
 			svm_cpu_support_mask |= (1 << cpu);
@@ -125,6 +142,12 @@ static int __init nano_init(void) {
 		}
 	}
 
+	pr_debug("preparing vmcb for vmrun\n");
+	if (svm_run_prep() == -1) {
+		pr_err("svm_run_prep failed\n");
+		return -ENOMEM;
+	}
+
 	return 0;
 }
 
@@ -133,6 +156,11 @@ static void __exit nano_exit(void) {
 	for_each_online_cpu(cpu) {
 		if ((svm_cpu_enabled_mask >> cpu) & 0b01)
 			svm_switch(cpu, false);
+	}
+
+	if (svm_vmcb_ptr) {
+		free_page((unsigned long)svm_vmcb_ptr);
+		svm_vmcb_ptr = NULL;
 	}
 	pr_info("Nanovisor Unloaded\n");
 }

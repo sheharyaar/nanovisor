@@ -38,4 +38,8 @@ struct __attribute__((packed)) svm_features {
 	bool x2avic_ext;
 };
 
+struct __attribute__((packed)) svm_vmcb {
+	bool _;
+};
+
 #endif

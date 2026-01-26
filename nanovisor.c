@@ -4,11 +4,28 @@
  */
 #include "nanovisor.h"
 #include <asm/cpufeature.h>
+#include <asm/io.h>
 #include <asm/msr.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/printk.h>
+
+static u64 svm_cpu_support_mask = 0;
+static u64 svm_cpu_enabled_mask = 0;
+struct svm_vmcb *svm_vmcb_ptr = NULL;
+
+static int svm_run_prep(void) {
+	svm_vmcb_ptr = (struct svm_vmcb *)get_zeroed_page(GFP_KERNEL);
+	if (!svm_vmcb_ptr)
+		return -ENOMEM;
+
+	pr_debug("page allocation successful: %px!\n", (void *)svm_vmcb_ptr);
+
+	pr_debug("page allocated for vmcb: KVA(%px), PA(%px)\n",
+		 (void *)svm_vmcb_ptr, (void *)virt_to_phys(svm_vmcb_ptr));
+	return 0;
+}
 
 static void svm_features_print(void) {
 #define TEST_PRINT_FEAT(feat, str)                                             \
@@ -28,26 +45,41 @@ static void svm_features_print(void) {
 #undef TEST_PRINT_FEAT
 }
 
-static bool svm_enable(void) {
+static bool svm_switch(int cpu, bool enable) {
 	// check EFER.SVME if already enabled
-	u64 efer_eax = 0;
-	rdmsrl(MSR_EFER, efer_eax);
-	pr_debug("efer_eax=%#llx\n", efer_eax);
+	u32 efer_eax = 0;
+	u32 efer_eax_h = 0;
+	rdmsr_on_cpu(cpu, MSR_EFER, &efer_eax, &efer_eax_h);
 
-	if ((efer_eax >> 12) & 0b01) {
-		pr_info("SVM is already enabled\n");
-		return true;
+	// TODO: test this check for already enabled, why does VirutalBox say
+	// already in use when this is loaded in host.
+	if (enable) {
+		if ((efer_eax >> 12) & 0b01) {
+			pr_info("[CPU %d] SVM is already enabled\n", cpu);
+			return true;
+		}
+		efer_eax |= (1 << 12);
+	} else {
+		if (!((efer_eax >> 12) & 0b01)) {
+			pr_info("[CPU %d] SVM is already disabled\n", cpu);
+			return true;
+		}
+		efer_eax &= ~(1 << 12);
 	}
 
-	// Try to enable SVM
-	efer_eax |= (1 << 12);
-	wrmsrl(MSR_EFER, efer_eax);
+	wrmsr_on_cpu(cpu, MSR_EFER, efer_eax, 0);
 
-	rdmsrl(MSR_EFER, efer_eax);
-	pr_debug("efer_eax new=%#llx\n", efer_eax);
-	if ((efer_eax >> 12) & 0b01) {
-		pr_info("SVM enabled successfully\n");
-		return true;
+	rdmsr_on_cpu(cpu, MSR_EFER, &efer_eax, &efer_eax_h);
+	if (enable) {
+		if ((efer_eax >> 12) & 0b01) {
+			pr_info("[CPU %d] SVM enabled successfully\n", cpu);
+			return true;
+		}
+	} else {
+		if (!((efer_eax >> 12) & 0b01)) {
+			pr_info("[CPU %d] SVM disabled successfully\n", cpu);
+			return true;
+		}
 	}
 
 	// Should not reach here
@@ -64,25 +96,29 @@ Check for SVM Support:
 			- If == 0, SVM is disabled at BIOS level
 			- Else ==11, can be unlocked using key
 */
-static bool svm_support_avail(void) {
+static bool svm_support_avail(int cpu) {
 	// check for SVM support in CPU
-	if (!boot_cpu_has(X86_FEATURE_SVM)) {
-		pr_err("SVM not available on the system\n");
+	struct cpuinfo_x86 *c = &cpu_data(cpu);
+	if (!cpu_has(c, X86_FEATURE_SVM)) {
+		pr_err("[CPU %d] SVM not available on the system\n", cpu);
 		return false;
 	}
 
 	// check if SVM is dsiabled on firmware level
-	uint32_t vm_cr = 0;
-	rdmsrl(MSR_VM_CR, vm_cr);
+	u32 vm_cr = 0;
+	u32 vm_cr_h = 0;
+	rdmsr_on_cpu(cpu, MSR_VM_CR, &vm_cr, &vm_cr_h);
 	if (!((vm_cr >> 4) & 0b01)) {
 		return true; // it's not disabled (+ its supported by CPU)
 	}
 
-	if (boot_cpu_has(X86_FEATURE_SVML)) {
-		pr_info("SVM can be unlocked using SVM Key, consult "
-			"TPM or platform firmware for the key.\n");
+	if (cpu_has(c, X86_FEATURE_SVML)) {
+		pr_info("[CPU %d] SVM can be unlocked using SVM Key, consult "
+			"TPM or platform firmware for the key.\n",
+			cpu);
 	} else {
-		pr_info("SVM must be enabled from frimware / BIOS\n");
+		pr_info("[CPU %d] SVM must be enabled from frimware / BIOS\n",
+			cpu);
 	}
 
 	return false;
@@ -90,23 +126,44 @@ static bool svm_support_avail(void) {
 
 static int __init nano_init(void) {
 	pr_info("Nanovisor Loaded\n");
-	if (!svm_support_avail()) {
-		return -1;
+	int cpu;
+
+	// enable SVME on each CPU
+	for_each_online_cpu(cpu) {
+		if (svm_support_avail(cpu)) {
+			svm_cpu_support_mask |= (1 << cpu);
+			pr_info("[CPU %d] SVM is supported\n", cpu);
+
+			if (svm_switch(cpu, true)) {
+				svm_cpu_enabled_mask |= (1 << cpu);
+			} else {
+				pr_err("[CPU %d] failed to enable SVM\n", cpu);
+			}
+		}
 	}
 
-	pr_info("SVM is supported, with the following feature status:\n");
-	svm_features_print();
-
-	pr_debug("Enabling SVM\n");
-
-	if (!svm_enable()) {
-		return -1;
+	pr_debug("preparing vmcb for vmrun\n");
+	if (svm_run_prep() == -1) {
+		pr_err("svm_run_prep failed\n");
+		return -ENOMEM;
 	}
 
 	return 0;
 }
 
-static void __exit nano_exit(void) { pr_info("Nanovisor Unloaded\n"); }
+static void __exit nano_exit(void) {
+	int cpu;
+	for_each_online_cpu(cpu) {
+		if ((svm_cpu_enabled_mask >> cpu) & 0b01)
+			svm_switch(cpu, false);
+	}
+
+	if (svm_vmcb_ptr) {
+		free_page((unsigned long)svm_vmcb_ptr);
+		svm_vmcb_ptr = NULL;
+	}
+	pr_info("Nanovisor Unloaded\n");
+}
 
 module_init(nano_init);
 module_exit(nano_exit);

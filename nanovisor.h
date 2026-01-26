@@ -6,19 +6,6 @@
 
 #include <linux/types.h>
 
-/* CPUID related defines for checking SVM support*/
-
-#define CPUID_FEAT 0x80000001
-#define CPUID_FEAT_SVM 0x8000000A
-
-#define FEAT_NP 0			    // Nested Paging
-#define FEAT_SVML 2			    // SVM Lock
-#define FEAT_VMCB_CLEAN 5		    // VMCB Clean Bits
-#define FEAT_VMSAVE_VIRT 15		    // VMSAVE and VMLOAD virtualization
-#define FEAT_ROGPT 21			    // Read-only Guest Page Tables
-#define FEAT_VNMI 25			    // NMI Virtualization
-#define FEAT_NESTED_VIRT_VMCB_ADDR_CHECK 28 // Guest VMCB Address Check
-
 /* MSRs involved in SVM (from Appendix A, Setion A.7) */
 
 #define MSR_EFER 0xc0000080
@@ -49,6 +36,10 @@ struct __attribute__((packed)) svm_features {
 	uint32_t nasid;
 	uint32_t feat_mask;
 	bool x2avic_ext;
+};
+
+struct __attribute__((packed)) svm_vmcb {
+	bool _;
 };
 
 #endif

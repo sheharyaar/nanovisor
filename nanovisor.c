@@ -6,6 +6,7 @@
 #include <asm/cpufeature.h>
 #include <asm/io.h>
 #include <asm/msr.h>
+#include <asm/set_memory.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -13,36 +14,99 @@
 
 static u64 svm_cpu_support_mask = 0;
 static u64 svm_cpu_enabled_mask = 0;
-struct svm_vmcb *svm_vmcb_ptr = NULL;
+unsigned long long svm_vmcb_page = NULL;
+unsigned long long svm_host_save_area_page = 0;
 
-static int svm_run_prep(void) {
-	svm_vmcb_ptr = (struct svm_vmcb *)get_zeroed_page(GFP_KERNEL);
-	if (!svm_vmcb_ptr)
-		return -ENOMEM;
+static int svm_vmcb_setup(void) {
+	if (sizeof(struct svm_vmcb_ctrl_area) != 1024) {
+		pr_err("VMCB control areas has wrong size\n");
+		return -1;
+	}
 
-	pr_debug("page allocation successful: %px!\n", (void *)svm_vmcb_ptr);
-
-	pr_debug("page allocated for vmcb: KVA(%px), PA(%px)\n",
-		 (void *)svm_vmcb_ptr, (void *)virt_to_phys(svm_vmcb_ptr));
+	if (sizeof(struct svm_vmcb_save_area) != 1992) {
+		pr_err("VMCB save areas has wrong size\n");
+		return -1;
+	}
 	return 0;
 }
 
-static void svm_features_print(void) {
-#define TEST_PRINT_FEAT(feat, str)                                             \
-	if (boot_cpu_has(feat))                                                \
-		pr_info(str ": yes\n");                                        \
-	else                                                                   \
-		pr_info(str ": no\n");
+static int svm_run(void) {
+	// 1. Put processor in protected mode, efer.svme to 1 (already done ??)
+	unsigned long long vmcb_pa = virt_to_phys(svm_vmcb_page);
+	unsigned long long save_area_pa = virt_to_phys(svm_host_save_area_page);
 
-	TEST_PRINT_FEAT(X86_FEATURE_X2AVIC, "X2AVIC Support");
-	TEST_PRINT_FEAT(X86_FEATURE_NPT, "Nested Paging");
-	TEST_PRINT_FEAT(X86_FEATURE_SVML, "SVM Lock");
-	TEST_PRINT_FEAT(X86_FEATURE_VMCBCLEAN, "VMCB Clean bits");
-	TEST_PRINT_FEAT(X86_FEATURE_V_VMSAVE_VMLOAD, "VMSAVE and VMLOAD");
-	TEST_PRINT_FEAT(X86_FEATURE_VNMI, "NMI Virtualisation");
-	TEST_PRINT_FEAT(X86_FEATURE_SVME_ADDR_CHK, "Guest VMCB Address Check");
+	if (!vmcb_pa || !save_area_pa) {
+		return -1;
+	}
 
-#undef TEST_PRINT_FEAT
+	// set 'MSR_VM_HASVE_PA'
+	wrmsrq(MSR_VM_HSAVE_PA, save_area_pa);
+
+	// set the GIF to 0
+	asm("clgi" ::: "memory");
+
+	// set to protected mode (CR0.PE)
+	unsigned long long cr0 = 0;
+	asm("movq %%cr0, %%rax" : "=a"(cr0)::);
+	cr0 |= 0b01;
+	asm("movq %%rax, %%cr0" ::"a"(cr0) :);
+
+	if (svm_vmcb_setup() != 0)
+		goto intr_err;
+
+	// set VMCB initial states
+	asm("vmrun\n" : : "a"(vmcb_pa) :);
+
+	// reset to host values
+	return 0;
+
+intr_err:
+	asm("stgi" ::: "memory");
+	return -1;
+}
+
+// VMCB address should be physical address, and 4-KB aligned and mapped as
+// writeback (WB)
+static int svm_run_prep(void) {
+	svm_vmcb_page = (struct svm_vmcb *)get_zeroed_page(GFP_KERNEL);
+	if (!svm_vmcb_page)
+		return -ENOMEM;
+
+	pr_debug("page allocated for vmcb: KVA(%px), PA(%px)\n",
+		 (void *)svm_vmcb_page, (void *)virt_to_phys(svm_vmcb_page));
+
+	// mark the page as wb
+	if (set_memory_wb(svm_vmcb_page, 1) != 0) {
+		pr_err("error in setting VMCB page as writeback\n");
+		goto clean_vmcb;
+	}
+	pr_debug("page marked as wb\n");
+
+	svm_save_area_page = (struct svm_vmcb *)get_zeroed_page(GFP_KERNEL);
+	if (!svm_save_area_page)
+		goto clean_vmcb;
+
+	pr_debug("page allocated for save_area: KVA(%px), PA(%px)\n",
+		 (void *)svm_save_area_page,
+		 (void *)virt_to_phys(svm_save_area_page));
+
+	// mark the page as wb
+	if (set_memory_wb(svm_save_area_page, 1) != 0) {
+		pr_err("error in setting save_area page as writeback\n");
+		goto clean_save_area;
+	}
+	pr_debug("page marked as wb\n");
+
+	return 0;
+
+clean_save_area:
+	free_page(svm_save_area_page);
+	svm_save_area_page = 0;
+
+clean_vmcb:
+	free_page(svm_vmcb_page);
+	svm_vmcb_page = 0;
+	return -1;
 }
 
 static bool svm_switch(int cpu, bool enable) {
@@ -143,10 +207,12 @@ static int __init nano_init(void) {
 	}
 
 	pr_debug("preparing vmcb for vmrun\n");
-	if (svm_run_prep() == -1) {
+	if (svm_run_prep() != 0) {
 		pr_err("svm_run_prep failed\n");
 		return -ENOMEM;
 	}
+
+	svm_run();
 
 	return 0;
 }

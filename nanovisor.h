@@ -38,8 +38,134 @@ struct __attribute__((packed)) svm_features {
 	bool x2avic_ext;
 };
 
+struct __attribute__((packed)) svm_vmcb_ctrl_area {
+	u32 intr_vectors[6]; // 24 bytes
+	u8 zeros[36];
+	u16 pause_thresh;
+	u16 pause_count;
+	u64 _;
+	u64 _;
+	u64 tsc_offset;
+	u32 guest_asid;
+	u8 tlb_control;
+	u8 _[3]; // 24 bits
+	u64 virt_intr_ctrl;
+	u64 guest_intr;
+	u64 exitcode;
+	u64 exitinfo1;
+	u64 exitinfo2;
+	u64 exitintinfo;
+	u64 _;
+	u64 _; // avic_api_bar
+	u64 ghcb_guest_pa;
+	u64 eventinj;
+	u64 nested_cr3;
+	u64 virt_ctrl; // LBR, VMSAVE/VMLOAD enable
+	u32 vmcb_clean;
+	u32 _;
+	u64 nrip;
+	u128 instr_stat;
+	u64 _; // AVIC APIC_BACKING_PAGE
+	u64 _;
+	u64 _; // AVIC_LOGICAL_TABLE
+	u64 _; // AVIC_PHYSICAL_TABLE
+	u64 _;
+	u64 vmsa_pointer;
+	u64 vmgexit_rax;
+	u64 vmgexit_cpl;
+	u64 buslock_thresh_counter;
+	u64 _;
+	u32 _;
+	u32 _; // UPDATE_IRR
+	u64 sev_allowed_features;
+	u64 sev_guest_features;
+	u64 _;
+	// // TODO: verify this
+	u128 request_irr_lo;
+	u128 requested_irr_hi;
+	u8 _[624];
+	u8 host_use[32];
+};
+
+struct __attribute__((packed)) svm_vmcb_segment {
+	u16 selector;
+	u16 attrib;
+	u32 limit;
+	u64 base;
+};
+
+struct __attribute__((packed)) svm_vmcb_save_area {
+	struct svm_vmcb_segment es;
+	struct svm_vmcb_segment cs;
+	struct svm_vmcb_segment ss;
+	struct svm_vmcb_segment ds;
+	struct svm_vmcb_segment fs;
+	struct svm_vmcb_segment gs;
+	struct svm_vmcb_segment gdtr;
+	struct svm_vmcb_segment ldtr;
+	struct svm_vmcb_segment idtr;
+	struct svm_vmcb_segment tr;
+	u8 _[43];
+	u8 cpl;
+	u32 _;
+	u64 efer;
+	u8 _[16];
+	u64 perf_ctl0;
+	u64 perf_ctr0;
+	u64 perf_ctl1;
+	u64 perf_ctr1;
+	u64 perf_ctl2;
+	u64 perf_ctr2;
+	u64 perf_ctl3;
+	u64 perf_ctr3;
+	u64 perf_ctl4;
+	u64 perf_ctr4;
+	u64 perf_ctl5;
+	u64 perf_ctr5;
+	u64 cr4;
+	u64 cr3;
+	u64 cr0;
+	u64 dr7;
+	u64 dr6;
+	u64 rflags;
+	u64 rip;
+	u8 _[64];
+	u64 instr_retired_ctr;
+	u64 perf_ctr_global_sts;
+	u64 perf_ctr_global_ctl;
+	u64 rsp;
+	u64 s_cet;
+	u64 ssp;
+	u64 isst_addr;
+	u64 rax;
+	u64 star;
+	u64 lstar;
+	u64 cstar;
+	u64 sfmask;
+	u64 kernel_gs_base;
+	u64 sysenter_cs;
+	u64 sysenter_esp;
+	u64 sysenter_eip;
+	u64 cr2;
+	u8 _[32];
+	u64 g_pat;
+	u64 dbgctl;
+	u64 br_from;
+	u64 br_to;
+	u64 lastexcpfrom;
+	u64 lastexcpto;
+	u64 debugextnctl;
+	u8 _[64];
+	u64 spec_ctrl;
+	u8 _[904];
+	u8 lbr_stack_from_to[256];
+	u64 lbr_select;
+	u64 ibs_virt_state[10];
+};
+
 struct __attribute__((packed)) svm_vmcb {
-	bool _;
+	struct svm_vmcb_ctrl_area vmcb_ctrl;
+	struct svm_vmcb_save_area vmcb_save;
 };
 
 #endif

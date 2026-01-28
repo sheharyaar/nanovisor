@@ -14,8 +14,8 @@
 
 static u64 svm_cpu_support_mask = 0;
 static u64 svm_cpu_enabled_mask = 0;
-unsigned long long svm_vmcb_page = NULL;
-unsigned long long svm_host_save_area_page = 0;
+struct vmcb *svm_vmcb_page = 0;
+void *svm_hsave_area_page = 0;
 
 static int svm_vmcb_setup(void) {
 	if (sizeof(struct svm_vmcb_ctrl_area) != 1024) {
@@ -32,15 +32,15 @@ static int svm_vmcb_setup(void) {
 
 static int svm_run(void) {
 	// 1. Put processor in protected mode, efer.svme to 1 (already done ??)
-	unsigned long long vmcb_pa = virt_to_phys(svm_vmcb_page);
-	unsigned long long save_area_pa = virt_to_phys(svm_host_save_area_page);
+	phys_addr_t vmcb_pa = virt_to_phys(svm_vmcb_page);
+	phys_addr_t save_area_pa = virt_to_phys(svm_hsave_area_page);
 
 	if (!vmcb_pa || !save_area_pa) {
 		return -1;
 	}
 
 	// set 'MSR_VM_HASVE_PA'
-	wrmsrq(MSR_VM_HSAVE_PA, save_area_pa);
+	wrmsrl(MSR_VM_HSAVE_PA, save_area_pa);
 
 	// set the GIF to 0
 	asm("clgi" ::: "memory");
@@ -55,9 +55,9 @@ static int svm_run(void) {
 		goto intr_err;
 
 	// set VMCB initial states
-	asm("vmrun\n" : : "a"(vmcb_pa) :);
+	asm("vmrun\n" ::"a"(vmcb_pa) :);
 
-	// reset to host values
+	// TODO: reset to host values
 	return 0;
 
 intr_err:
@@ -68,7 +68,7 @@ intr_err:
 // VMCB address should be physical address, and 4-KB aligned and mapped as
 // writeback (WB)
 static int svm_run_prep(void) {
-	svm_vmcb_page = (struct svm_vmcb *)get_zeroed_page(GFP_KERNEL);
+	svm_vmcb_page = (struct vmcb *)get_zeroed_page(GFP_KERNEL);
 	if (!svm_vmcb_page)
 		return -ENOMEM;
 
@@ -76,22 +76,22 @@ static int svm_run_prep(void) {
 		 (void *)svm_vmcb_page, (void *)virt_to_phys(svm_vmcb_page));
 
 	// mark the page as wb
-	if (set_memory_wb(svm_vmcb_page, 1) != 0) {
+	if (set_memory_wb((unsigned long)svm_vmcb_page, 1) != 0) {
 		pr_err("error in setting VMCB page as writeback\n");
 		goto clean_vmcb;
 	}
 	pr_debug("page marked as wb\n");
 
-	svm_save_area_page = (struct svm_vmcb *)get_zeroed_page(GFP_KERNEL);
-	if (!svm_save_area_page)
+	svm_hsave_area_page = (void *)get_zeroed_page(GFP_KERNEL);
+	if (!svm_hsave_area_page)
 		goto clean_vmcb;
 
 	pr_debug("page allocated for save_area: KVA(%px), PA(%px)\n",
-		 (void *)svm_save_area_page,
-		 (void *)virt_to_phys(svm_save_area_page));
+		 (void *)svm_hsave_area_page,
+		 (void *)virt_to_phys(svm_hsave_area_page));
 
 	// mark the page as wb
-	if (set_memory_wb(svm_save_area_page, 1) != 0) {
+	if (set_memory_wb((unsigned long)svm_hsave_area_page, 1) != 0) {
 		pr_err("error in setting save_area page as writeback\n");
 		goto clean_save_area;
 	}
@@ -100,20 +100,19 @@ static int svm_run_prep(void) {
 	return 0;
 
 clean_save_area:
-	free_page(svm_save_area_page);
-	svm_save_area_page = 0;
+	free_page((unsigned long)svm_hsave_area_page);
+	svm_hsave_area_page = 0;
 
 clean_vmcb:
-	free_page(svm_vmcb_page);
+	free_page((unsigned long)svm_vmcb_page);
 	svm_vmcb_page = 0;
 	return -1;
 }
 
 static bool svm_switch(int cpu, bool enable) {
 	// check EFER.SVME if already enabled
-	u32 efer_eax = 0;
-	u32 efer_eax_h = 0;
-	rdmsr_on_cpu(cpu, MSR_EFER, &efer_eax, &efer_eax_h);
+	u64 efer_eax = 0;
+	rdmsrl_on_cpu(cpu, MSR_EFER, &efer_eax);
 
 	// TODO: test this check for already enabled, why does VirutalBox say
 	// already in use when this is loaded in host.
@@ -131,9 +130,9 @@ static bool svm_switch(int cpu, bool enable) {
 		efer_eax &= ~(1 << 12);
 	}
 
-	wrmsr_on_cpu(cpu, MSR_EFER, efer_eax, 0);
+	wrmsrl_on_cpu(cpu, MSR_EFER, efer_eax);
 
-	rdmsr_on_cpu(cpu, MSR_EFER, &efer_eax, &efer_eax_h);
+	rdmsrl_on_cpu(cpu, MSR_EFER, &efer_eax);
 	if (enable) {
 		if ((efer_eax >> 12) & 0b01) {
 			pr_info("[CPU %d] SVM enabled successfully\n", cpu);
@@ -169,9 +168,8 @@ static bool svm_support_avail(int cpu) {
 	}
 
 	// check if SVM is dsiabled on firmware level
-	u32 vm_cr = 0;
-	u32 vm_cr_h = 0;
-	rdmsr_on_cpu(cpu, MSR_VM_CR, &vm_cr, &vm_cr_h);
+	u64 vm_cr = 0;
+	rdmsrl_on_cpu(cpu, MSR_VM_CR, &vm_cr);
 	if (!((vm_cr >> 4) & 0b01)) {
 		return true; // it's not disabled (+ its supported by CPU)
 	}
@@ -224,9 +222,14 @@ static void __exit nano_exit(void) {
 			svm_switch(cpu, false);
 	}
 
-	if (svm_vmcb_ptr) {
-		free_page((unsigned long)svm_vmcb_ptr);
-		svm_vmcb_ptr = NULL;
+	if (svm_vmcb_page) {
+		free_page((unsigned long)svm_vmcb_page);
+		svm_vmcb_page = 0;
+	}
+
+	if (svm_hsave_area_page) {
+		free_page((unsigned long)svm_hsave_area_page);
+		svm_hsave_area_page = 0;
 	}
 	pr_info("Nanovisor Unloaded\n");
 }
